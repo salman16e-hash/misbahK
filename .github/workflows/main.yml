@@ -1,0 +1,242 @@
+name: UNIVERSAL APK BUILDER (Web + Android)
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platforms;android-34'
+
+      - name: Accept Android Licenses
+        run: yes | sdkmanager --licenses || true
+
+      - name: Download and Setup Gradle 8.0
+        run: |
+          wget -q https://services.gradle.org/distributions/gradle-8.0-bin.zip
+          unzip -q gradle-8.0-bin.zip
+          echo "$(pwd)/gradle-8.0/bin" >> $GITHUB_PATH
+
+      - name: Unzip Project (If ZIP exists)
+        run: |
+          ZIP_FILE=$(ls *.zip | head -1 || true)
+          if [ ! -z "$ZIP_FILE" ]; then
+            echo "Found ZIP: $ZIP_FILE. Unzipping..."
+            rm -rf project-files app gradle build .gradle gradlew* 2>/dev/null || true
+            unzip -q "$ZIP_FILE" -d project-files
+            rm -f "$ZIP_FILE"
+            cp -r project-files/* .
+            rm -rf project-files
+          else
+            echo "No ZIP found. Using repository files directly."
+          fi
+
+      - name: Check if Android Project or Web Project
+        id: check
+        run: |
+          if [ -f "settings.gradle" ] || [ -f "build.gradle" ]; then
+            echo "PROJECT_TYPE=android" >> $GITHUB_OUTPUT
+            echo "Android project detected."
+          else
+            echo "PROJECT_TYPE=web" >> $GITHUB_OUTPUT
+            echo "Web project detected."
+          fi
+
+      - name: Process Android Project
+        if: steps.check.outputs.PROJECT_TYPE == 'android'
+        run: |
+          # आवश्यक फाइलें ऑटो-जनरेट करें (पिछले फिक्स)
+          mkdir -p app/src/main/res/xml
+          cat > app/src/main/res/xml/data_extraction_rules.xml << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <data-extraction-rules>
+              <cloud-backup>
+                  <include domain="sharedpref" path="." />
+                  <include domain="database" path="." />
+                  <include domain="file" path="." />
+                  <exclude domain="sharedpref" path="device_prefs.xml" />
+              </cloud-backup>
+          </data-extraction-rules>
+          EOF
+          cat > app/src/main/res/xml/backup_rules.xml << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <full-backup-content>
+              <include domain="sharedpref" path="." />
+              <include domain="database" path="." />
+              <include domain="file" path="." />
+          </full-backup-content>
+          EOF
+          for res in mipmap-mdpi mipmap-hdpi mipmap-xhdpi mipmap-xxhdpi mipmap-xxxhdpi; do
+            mkdir -p app/src/main/res/$res
+            curl -sL https://github.com/google/material-design-icons/raw/master/png/android/ic_launcher_round/mipmap-mdpi/ic_launcher_round.png -o app/src/main/res/$res/ic_launcher.png || true
+            curl -sL https://github.com/google/material-design-icons/raw/master/png/android/ic_launcher_round/mipmap-mdpi/ic_launcher_round.png -o app/src/main/res/$res/ic_launcher_round.png || true
+          done
+          find app/src/main/res -name "item_file_list.xml" -exec sed -i 's/android:textStyle="medium"/android:textStyle="normal"/g' {} \; 2>/dev/null || true
+          
+          mkdir -p app/src/main/res/layout
+          cat > app/src/main/res/layout/dialog_rename.xml << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+              android:layout_width="match_parent"
+              android:layout_height="wrap_content"
+              android:orientation="vertical"
+              android:padding="16dp">
+              <com.google.android.material.textfield.TextInputLayout
+                  android:layout_width="match_parent"
+                  android:layout_height="wrap_content"
+                  android:hint="New name">
+                  <com.google.android.material.textfield.TextInputEditText
+                      android:id="@+id/editTextName"
+                      android:layout_width="match_parent"
+                      android:layout_height="wrap_content"
+                      android:inputType="text"
+                      android:maxLines="1" />
+              </com.google.android.material.textfield.TextInputLayout>
+          </LinearLayout>
+          EOF
+          
+          chmod +x gradlew || true
+          ./gradlew assembleDebug --stacktrace
+
+      - name: Generate WebView Project
+        if: steps.check.outputs.PROJECT_TYPE == 'web'
+        run: |
+          # बेसिक Android WebView प्रोजेक्ट बनाओ
+          mkdir -p app/src/main/java/com/webview/app
+          mkdir -p app/src/main/res/layout
+          mkdir -p app/src/main/res/values
+          mkdir -p app/src/main/assets
+          
+          # settings.gradle
+          echo "include ':app'" > settings.gradle
+          
+          # root build.gradle
+          cat > build.gradle << 'EOF'
+          buildscript {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+              dependencies {
+                  classpath "com.android.tools.build:gradle:8.1.1"
+              }
+          }
+          allprojects {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          EOF
+          
+          # app/build.gradle
+          cat > app/build.gradle << 'EOF'
+          plugins {
+              id 'com.android.application'
+          }
+          android {
+              namespace 'com.webview.app'
+              compileSdk 34
+              defaultConfig {
+                  applicationId "com.webview.app"
+                  minSdk 21
+                  targetSdk 34
+                  versionCode 1
+                  versionName "1.0"
+              }
+              buildTypes {
+                  release {
+                      minifyEnabled false
+                  }
+              }
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+          dependencies {
+              implementation 'androidx.appcompat:appcompat:1.6.1'
+              implementation 'com.google.android.material:material:1.9.0'
+          }
+          EOF
+          
+          # AndroidManifest.xml
+          cat > app/src/main/AndroidManifest.xml << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+              package="com.webview.app">
+              <uses-permission android:name="android.permission.INTERNET" />
+              <application
+                  android:allowBackup="true"
+                  android:label="My App"
+                  android:theme="@style/Theme.AppCompat.Light.NoActionBar">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+          
+          # MainActivity.java
+          cat > app/src/main/java/com/webview/app/MainActivity.java << 'EOF'
+          package com.webview.app;
+          import android.app.Activity;
+          import android.os.Bundle;
+          import android.webkit.WebView;
+          import android.webkit.WebViewClient;
+          
+          public class MainActivity extends Activity {
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  WebView webView = new WebView(this);
+                  webView.getSettings().setJavaScriptEnabled(true);
+                  webView.setWebViewClient(new WebViewClient());
+                  webView.loadUrl("file:///android_asset/index.html");
+                  setContentView(webView);
+              }
+          }
+          EOF
+          
+          # लेआउट और वैल्यूज
+          cat > app/src/main/res/values/strings.xml << 'EOF'
+          <resources>
+              <string name="app_name">My App</string>
+          </resources>
+          EOF
+          
+          # वेब फाइलों को assets में कॉपी करो
+          cp -r * app/src/main/assets/ || true
+          rm -rf app/src/main/assets/app app/src/main/assets/gradle app/src/main/assets/build
+
+      - name: Build WebView APK
+        if: steps.check.outputs.PROJECT_TYPE == 'web'
+        run: |
+          chmod +x gradlew || true
+          ./gradlew assembleDebug --stacktrace
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FolderCamManager_APK
+          path: app/build/outputs/apk/debug/*.apk
